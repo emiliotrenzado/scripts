@@ -11,8 +11,10 @@ Storyboard format (markdown, one heading per scene):
     ## Scene 3 - Old Town square
     Budget: 1:30                     <- optional per-scene target (m:ss or 90s)
     Location: Piata Sfatului, morning
-    VO: Spoken words go here. Every line tagged VO:, Narration:, Talking head:,
-        A-roll: or Dialogue: is counted as spoken words.
+    Wide: the thought I say from the square, then a pause   <- one thought
+    Close: the second thought, new angle                    <- one thought
+    Drone: the third thought over the rooftops               <- one thought
+    VO: Fully scripted lines are counted as spoken words instead.
     B-roll: drone reveal (12s)       <- silent footage; the (12s) is added as-is
     B-roll: walking shots            <- no duration given: default --broll-default
     Duration: 2:00                   <- optional hard override for the scene
@@ -20,10 +22,20 @@ Storyboard format (markdown, one heading per scene):
     Actual: 3:10                     <- what it cut down to in the finished edit
     Estimate: 1:12                   <- written by --annotate; safe to keep on the card
 
+A card is one location. Each camera view on it is one thought: you say one
+thing from that angle, pause, and move to the next view. Lines tagged with a
+camera view (Wide:, Medium:, Close:, Drone:, Gimbal:, Handheld:, POV:, Selfie:,
+Walk:, Insert:, Detail:, Static:, or a generic Thought:) count as one thought
+each, at --thought seconds (default 25). A long scripted thought is counted by
+its words instead when that comes out longer.
+
 How a card's length is decided, first match wins:
     Actual: (the finished edit)  >  Duration: (your gut number)  >
-    Raw: x ratio (raw footage scaled by your cut ratio)  >  spoken words + B-roll.
+    Raw: x ratio (raw footage scaled by your cut ratio)  >
+    thoughts x --thought + B-roll  >  spoken words + B-roll.
 
+Both --thought and the cut ratio are what past videos taught you. --calibrate
+also reports seconds per thought from cards that carry Actual: and thoughts.
 The cut ratio is what past videos taught you. Put Raw: and Actual: on the cards
 of a finished video and run --calibrate to see the ratio per card and overall.
 Pass --ratio 0.22 (or let the file's own Raw/Actual pairs supply it) and any new
@@ -52,6 +64,9 @@ import re
 import sys
 
 SPEECH_TAGS = ("vo", "narration", "talking head", "a-roll", "dialogue", "pieces to camera", "ptc")
+THOUGHT_TAGS = ("thought", "beat", "wide", "medium", "med", "close", "close-up", "closeup", "cu", "mcu", "ecu",
+                "drone", "gimbal", "handheld", "tripod", "static", "pov", "selfie", "walk", "walk and talk",
+                "walk-and-talk", "insert", "detail", "ots", "over the shoulder", "pan", "tilt", "dolly", "slider")
 SILENT_TAGS = ("b-roll", "broll", "montage")
 DIRECTIVE_TAGS = ("estimate", "raw", "actual", "location", "shot", "shots", "gear", "note", "notes", "budget", "duration", "music", "sfx", "graphics", "text")
 HEADING_RE = re.compile(r"^\s*#{1,6}\s+(.*\S)\s*$")
@@ -96,7 +111,8 @@ def parse_storyboard(lines, broll_default):
             if line.lstrip().startswith("# "):
                 continue
             current = {"title": title, "heading_index": idx, "tagged_words": 0, "plain_words": 0,
-                       "broll": 0.0, "budget": None, "override": None, "raw": None, "actual": None}
+                       "broll": 0.0, "budget": None, "override": None, "raw": None, "actual": None,
+                       "thoughts": []}
             scenes.append(current)
             continue
         if current is None or not line.strip():
@@ -104,7 +120,9 @@ def parse_storyboard(lines, broll_default):
         tag = TAG_RE.match(line)
         key = tag.group(1).strip().lower() if tag else None
         body = tag.group(2) if tag else line
-        if key in SPEECH_TAGS:
+        if key in THOUGHT_TAGS:
+            current["thoughts"].append(word_count(body))
+        elif key in SPEECH_TAGS:
             current["tagged_words"] += word_count(body)
         elif key in SILENT_TAGS:
             m = PAREN_DURATION_RE.search(body)
@@ -126,7 +144,9 @@ def parse_storyboard(lines, broll_default):
         else:
             # Continuation lines of a tagged block are indented; count them with
             # the tagged words if the scene uses tags, else as plain narration.
-            if line.startswith((" ", "\t")) and current["tagged_words"]:
+            if line.startswith((" ", "\t")) and current["thoughts"]:
+                current["thoughts"][-1] += word_count(body)
+            elif line.startswith((" ", "\t")) and current["tagged_words"]:
                 current["tagged_words"] += word_count(body)
             else:
                 current["plain_words"] += word_count(body)
@@ -158,9 +178,28 @@ def cut_ratio(scenes):
     return actual / raw if raw else None
 
 
+def thought_seconds(scenes):
+    """Average finished seconds per thought from cards with Actual: and thoughts, or None."""
+    cards = [sc for sc in scenes if sc["actual"] is not None and sc["thoughts"]]
+    n = sum(len(sc["thoughts"]) for sc in cards)
+    if not n:
+        return None
+    return sum(sc["actual"] - sc["broll"] for sc in cards) / n
+
+
 def calibrate(scenes):
+    secs = thought_seconds(scenes)
+    if secs:
+        cards = [sc for sc in scenes if sc["actual"] is not None and sc["thoughts"]]
+        n = sum(len(sc["thoughts"]) for sc in cards)
+        print(f"Thoughts: {n} across {len(cards)} finished cards, {secs:.0f}s each after the cut (B-roll excluded). "
+              f"Use --thought {secs:.0f} on the next storyboard. At that pace 20:00 holds about {int(20 * 60 / secs)} thoughts.")
+        print()
+
     pairs = [sc for sc in scenes if sc["raw"] and sc["actual"] is not None]
     if not pairs:
+        if secs:
+            return 0
         print("No cards with both Raw: and Actual: lines. Add them to a finished video's cards and re-run.")
         return 2
     title_w = min(max(max(len(sc["title"]) for sc in pairs), 5), 40)
@@ -190,6 +229,7 @@ def main():
     ap.add_argument("--max", type=float, default=None, help="hard ceiling in minutes; over this fails (default target + 1)")
     ap.add_argument("--annotate", action="store_true", help="write an 'Estimate: m:ss' line under every scene heading in the file")
     ap.add_argument("--ratio", type=float, default=None, help="final/raw cut ratio for cards that only have a Raw: line (default: derived from the file's Raw/Actual pairs)")
+    ap.add_argument("--thought", type=float, default=None, help="finished seconds per thought (camera view) on a card (default 25, or derived from the file's Actual: cards)")
     ap.add_argument("--calibrate", action="store_true", help="report Raw: vs Actual: per card and the overall cut ratio, then exit")
     args = ap.parse_args()
     max_minutes = args.max if args.max is not None else args.target + 1
@@ -203,6 +243,7 @@ def main():
     if args.calibrate:
         return calibrate(scenes)
     ratio = args.ratio if args.ratio is not None else cut_ratio(scenes)
+    per_thought = args.thought if args.thought is not None else (thought_seconds(scenes) or 25.0)
 
     target_s = args.target * 60
     even_budget = target_s / len(scenes)
@@ -211,7 +252,12 @@ def main():
     rows = []
     for sc in scenes:
         words = sc["tagged_words"] if sc["tagged_words"] else sc["plain_words"]
+        words += sum(sc["thoughts"])
         speech = words / args.wpm * 60
+        if sc["thoughts"]:
+            # Each thought is at least --thought seconds; a long scripted one is counted by its words.
+            speech = sum(max(per_thought, w / args.wpm * 60) for w in sc["thoughts"]) + (
+                (sc["tagged_words"] or 0) / args.wpm * 60)
         if sc["actual"] is not None:
             projected = sc["actual"]
         elif sc["override"] is not None:
@@ -222,28 +268,31 @@ def main():
             projected = speech + sc["broll"]
         budget = sc["budget"] if sc["budget"] is not None else even_budget
         total += projected
-        rows.append((sc["title"], words, speech, sc["broll"], projected, budget, projected - budget, total))
+        rows.append((sc["title"], len(sc["thoughts"]), speech, sc["broll"], projected, budget, projected - budget, total))
 
     if args.annotate:
         annotate(args.storyboard, lines, scenes, [r[4] for r in rows])
 
     title_w = max(len(r[0]) for r in rows)
     title_w = min(max(title_w, 5), 40)
-    header = f"{'Scene':<{title_w}}  {'Words':>5}  {'Speech':>6}  {'B-roll':>6}  {'Total':>6}  {'Budget':>6}  {'Over':>6}  {'Cum':>6}"
+    header = f"{'Scene':<{title_w}}  {'Thgts':>5}  {'Speech':>6}  {'B-roll':>6}  {'Total':>6}  {'Budget':>6}  {'Over':>6}  {'Cum':>6}"
     print(header)
     print("-" * len(header))
     crossed = False
-    for title, words, speech, broll, projected, budget, over, cum in rows:
+    for title, thoughts, speech, broll, projected, budget, over, cum in rows:
         flag = "  <-- trim" if over > max(10, budget * 0.15) else ""
         if cum > max_s and not crossed:
             flag = "  <-- ceiling crossed here" + ("" if not flag else ", trim")
             crossed = True
         sign = "+" if over > 0 else "-"
-        print(f"{title[:title_w]:<{title_w}}  {words:>5}  {fmt(speech):>6}  {fmt(broll):>6}  {fmt(projected):>6}  {fmt(budget):>6}  {sign + fmt(abs(over)):>6}  {fmt(cum):>6}{flag}")
+        print(f"{title[:title_w]:<{title_w}}  {thoughts:>5}  {fmt(speech):>6}  {fmt(broll):>6}  {fmt(projected):>6}  {fmt(budget):>6}  {sign + fmt(abs(over)):>6}  {fmt(cum):>6}{flag}")
     print("-" * len(header))
 
     if len(scenes) > 10:
         print(f"Scene count check: {len(scenes)} scenes at {fmt(target_s)} is {fmt(even_budget)} each. Location scenes tend to run about 2:00, so this count would land near {fmt(len(scenes) * 120)}. Merge or cut cards rather than trimming all of them.")
+    total_thoughts = sum(len(sc["thoughts"]) for sc in scenes)
+    if total_thoughts:
+        print(f"Thoughts: {total_thoughts} at {per_thought:.0f}s each. {fmt(target_s)} holds about {int(target_s / per_thought)} at that pace.")
     ratio_note = f", cut ratio {ratio:.2f}" if ratio else ""
     print(f"Projected runtime: {fmt(total)}  (target {fmt(target_s)}, ceiling {fmt(max_s)}, {len(scenes)} scenes, {args.wpm:g} wpm{ratio_note})")
     raw_only = [sc["title"] for sc in scenes if sc["raw"] and sc["actual"] is None and sc["override"] is None and not ratio]
@@ -258,7 +307,10 @@ def main():
 
     excess = total - target_s
     words_to_cut = int(round(excess / 60 * args.wpm))
-    print(f"OVER the ceiling by {fmt(total - max_s)}. Cut about {words_to_cut} spoken words, or {fmt(excess)} of B-roll, to land on target.")
+    if total_thoughts:
+        print(f"OVER the ceiling by {fmt(total - max_s)}. Drop about {int(excess / per_thought + 0.999)} thoughts, or {fmt(excess)} of B-roll, to land on target.")
+    else:
+        print(f"OVER the ceiling by {fmt(total - max_s)}. Cut about {words_to_cut} spoken words, or {fmt(excess)} of B-roll, to land on target.")
     worst = [r for r in sorted(rows, key=lambda r: r[6], reverse=True)[:3] if r[6] > 0]
     if worst:
         print("Scenes furthest over their budget:")
