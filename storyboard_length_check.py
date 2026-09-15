@@ -16,7 +16,18 @@ Storyboard format (markdown, one heading per scene):
     B-roll: drone reveal (12s)       <- silent footage; the (12s) is added as-is
     B-roll: walking shots            <- no duration given: default --broll-default
     Duration: 2:00                   <- optional hard override for the scene
+    Raw: 14:30                       <- raw footage shot for this card
+    Actual: 3:10                     <- what it cut down to in the finished edit
     Estimate: 1:12                   <- written by --annotate; safe to keep on the card
+
+How a card's length is decided, first match wins:
+    Actual: (the finished edit)  >  Duration: (your gut number)  >
+    Raw: x ratio (raw footage scaled by your cut ratio)  >  spoken words + B-roll.
+
+The cut ratio is what past videos taught you. Put Raw: and Actual: on the cards
+of a finished video and run --calibrate to see the ratio per card and overall.
+Pass --ratio 0.22 (or let the file's own Raw/Actual pairs supply it) and any new
+card with only a Raw: line is estimated as raw x ratio.
 
 Scenes without any spoken-word tag count every plain paragraph as narration.
 Lines that start with a directive (Location:, Shot:, Gear:, Note:, Budget:,
@@ -26,6 +37,8 @@ Usage:
     python3 storyboard_length_check.py storyboard.md                 # target 20, ceiling 21
     python3 storyboard_length_check.py storyboard.md --annotate      # stamp Estimate: on every card
     python3 storyboard_length_check.py storyboard.md --wpm 145 --max 21
+    python3 storyboard_length_check.py last_video.md --calibrate       # raw vs actual per card
+    python3 storyboard_length_check.py storyboard.md --ratio 0.22      # raw footage x ratio
 
 --annotate rewrites the file in place, adding or refreshing an "Estimate: m:ss"
 line under each scene heading so every card carries its own length. Reorder the
@@ -40,7 +53,7 @@ import sys
 
 SPEECH_TAGS = ("vo", "narration", "talking head", "a-roll", "dialogue", "pieces to camera", "ptc")
 SILENT_TAGS = ("b-roll", "broll", "montage")
-DIRECTIVE_TAGS = ("estimate", "location", "shot", "shots", "gear", "note", "notes", "budget", "duration", "music", "sfx", "graphics", "text")
+DIRECTIVE_TAGS = ("estimate", "raw", "actual", "location", "shot", "shots", "gear", "note", "notes", "budget", "duration", "music", "sfx", "graphics", "text")
 HEADING_RE = re.compile(r"^\s*#{1,6}\s+(.*\S)\s*$")
 TAG_RE = re.compile(r"^\s*([A-Za-z][A-Za-z \-]*?)\s*:\s*(.*)$")
 PAREN_DURATION_RE = re.compile(r"\((\d+(?::\d{2})?)\s*(s|sec|secs|m|min)?\)")
@@ -83,7 +96,7 @@ def parse_storyboard(lines, broll_default):
             if line.lstrip().startswith("# "):
                 continue
             current = {"title": title, "heading_index": idx, "tagged_words": 0, "plain_words": 0,
-                       "broll": 0.0, "budget": None, "override": None}
+                       "broll": 0.0, "budget": None, "override": None, "raw": None, "actual": None}
             scenes.append(current)
             continue
         if current is None or not line.strip():
@@ -104,6 +117,10 @@ def parse_storyboard(lines, broll_default):
             current["budget"] = parse_duration(body)
         elif key == "duration":
             current["override"] = parse_duration(body)
+        elif key == "raw":
+            current["raw"] = parse_duration(body)
+        elif key == "actual":
+            current["actual"] = parse_duration(body)
         elif key in DIRECTIVE_TAGS:
             continue
         else:
@@ -134,6 +151,36 @@ def annotate(path, lines, scenes, estimates):
         fh.writelines(out)
 
 
+def cut_ratio(scenes):
+    """Overall final/raw ratio from every card that has both numbers, or None."""
+    raw = sum(sc["raw"] for sc in scenes if sc["raw"] and sc["actual"] is not None)
+    actual = sum(sc["actual"] for sc in scenes if sc["raw"] and sc["actual"] is not None)
+    return actual / raw if raw else None
+
+
+def calibrate(scenes):
+    pairs = [sc for sc in scenes if sc["raw"] and sc["actual"] is not None]
+    if not pairs:
+        print("No cards with both Raw: and Actual: lines. Add them to a finished video's cards and re-run.")
+        return 2
+    title_w = min(max(max(len(sc["title"]) for sc in pairs), 5), 40)
+    header = f"{'Scene':<{title_w}}  {'Raw':>6}  {'Actual':>6}  {'Kept':>5}"
+    print(header)
+    print("-" * len(header))
+    for sc in pairs:
+        print(f"{sc['title'][:title_w]:<{title_w}}  {fmt(sc['raw']):>6}  {fmt(sc['actual']):>6}  {sc['actual'] / sc['raw'] * 100:>4.0f}%")
+    print("-" * len(header))
+    raw = sum(sc["raw"] for sc in pairs)
+    actual = sum(sc["actual"] for sc in pairs)
+    ratio = actual / raw
+    ratios = sorted(sc["actual"] / sc["raw"] for sc in pairs)
+    print(f"Overall: {fmt(raw)} raw -> {fmt(actual)} final, ratio {ratio:.2f} (kept {ratio * 100:.0f}%).")
+    print(f"Per-card range: {ratios[0] * 100:.0f}% to {ratios[-1] * 100:.0f}%.")
+    print(f"Rule of thumb: {fmt(60 / ratio)} of raw footage per finished minute, so a 20 minute video needs about {fmt(20 * 60 / ratio)} raw.")
+    print(f"Use it on the next storyboard with --ratio {ratio:.2f}, or keep these cards in the same file and it is picked up automatically.")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Project storyboard runtime per scene.")
     ap.add_argument("storyboard", help="markdown storyboard file")
@@ -142,6 +189,8 @@ def main():
     ap.add_argument("--broll-default", type=float, default=6.0, help="seconds per untimed B-roll line (default 6)")
     ap.add_argument("--max", type=float, default=None, help="hard ceiling in minutes; over this fails (default target + 1)")
     ap.add_argument("--annotate", action="store_true", help="write an 'Estimate: m:ss' line under every scene heading in the file")
+    ap.add_argument("--ratio", type=float, default=None, help="final/raw cut ratio for cards that only have a Raw: line (default: derived from the file's Raw/Actual pairs)")
+    ap.add_argument("--calibrate", action="store_true", help="report Raw: vs Actual: per card and the overall cut ratio, then exit")
     args = ap.parse_args()
     max_minutes = args.max if args.max is not None else args.target + 1
 
@@ -151,6 +200,9 @@ def main():
     if not scenes:
         print("No scenes found. Use one markdown heading per scene, e.g. '## Scene 1 - Airport'.")
         return 2
+    if args.calibrate:
+        return calibrate(scenes)
+    ratio = args.ratio if args.ratio is not None else cut_ratio(scenes)
 
     target_s = args.target * 60
     even_budget = target_s / len(scenes)
@@ -160,7 +212,14 @@ def main():
     for sc in scenes:
         words = sc["tagged_words"] if sc["tagged_words"] else sc["plain_words"]
         speech = words / args.wpm * 60
-        projected = sc["override"] if sc["override"] is not None else speech + sc["broll"]
+        if sc["actual"] is not None:
+            projected = sc["actual"]
+        elif sc["override"] is not None:
+            projected = sc["override"]
+        elif sc["raw"] and ratio:
+            projected = sc["raw"] * ratio
+        else:
+            projected = speech + sc["broll"]
         budget = sc["budget"] if sc["budget"] is not None else even_budget
         total += projected
         rows.append((sc["title"], words, speech, sc["broll"], projected, budget, projected - budget, total))
@@ -183,7 +242,11 @@ def main():
         print(f"{title[:title_w]:<{title_w}}  {words:>5}  {fmt(speech):>6}  {fmt(broll):>6}  {fmt(projected):>6}  {fmt(budget):>6}  {sign + fmt(abs(over)):>6}  {fmt(cum):>6}{flag}")
     print("-" * len(header))
 
-    print(f"Projected runtime: {fmt(total)}  (target {fmt(target_s)}, ceiling {fmt(max_s)}, {len(scenes)} scenes, {args.wpm:g} wpm)")
+    ratio_note = f", cut ratio {ratio:.2f}" if ratio else ""
+    print(f"Projected runtime: {fmt(total)}  (target {fmt(target_s)}, ceiling {fmt(max_s)}, {len(scenes)} scenes, {args.wpm:g} wpm{ratio_note})")
+    raw_only = [sc["title"] for sc in scenes if sc["raw"] and sc["actual"] is None and sc["override"] is None and not ratio]
+    if raw_only:
+        print(f"Cards with Raw: but no ratio to apply (pass --ratio or add Raw/Actual pairs): {', '.join(raw_only)}")
     if args.annotate:
         print(f"Wrote Estimate: lines to {args.storyboard}.")
     if total <= max_s:
