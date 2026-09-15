@@ -6,7 +6,8 @@ Rules that keep the runtime honest:
 - Give every scene a `Budget:` line before writing its VO. Write to the budget, not to the location.
 - At 150 words per minute, 2:30 of talking is about 375 words. Most scenes need less than that because B-roll eats time silently.
 - Time every B-roll line in parentheses. Untimed B-roll is where the extra 10 minutes hides.
-- Run `python3 storyboard_length_check.py <file> --target 20` after each pass. If it says OVER, cut before adding.
+- Run `python3 storyboard_length_check.py <file> --annotate` after each pass. It stamps an `Estimate:` line on every card and fails past the 21 minute ceiling (target 20, `--max 21`).
+- Keep the `Estimate:` line on the card when you move it. The cumulative column shows exactly which card pushes the video past 21 minutes, so reorder freely and re-run.
 
 ## Scene 1 - Arrival
 Budget: 1:30
