@@ -242,6 +242,8 @@ def main():
         print(f"{title[:title_w]:<{title_w}}  {words:>5}  {fmt(speech):>6}  {fmt(broll):>6}  {fmt(projected):>6}  {fmt(budget):>6}  {sign + fmt(abs(over)):>6}  {fmt(cum):>6}{flag}")
     print("-" * len(header))
 
+    if len(scenes) > 10:
+        print(f"Scene count check: {len(scenes)} scenes at {fmt(target_s)} is {fmt(even_budget)} each. Location scenes tend to run about 2:00, so this count would land near {fmt(len(scenes) * 120)}. Merge or cut cards rather than trimming all of them.")
     ratio_note = f", cut ratio {ratio:.2f}" if ratio else ""
     print(f"Projected runtime: {fmt(total)}  (target {fmt(target_s)}, ceiling {fmt(max_s)}, {len(scenes)} scenes, {args.wpm:g} wpm{ratio_note})")
     raw_only = [sc["title"] for sc in scenes if sc["raw"] and sc["actual"] is None and sc["override"] is None and not ratio]
